@@ -1,5 +1,5 @@
-from scapy.all import PcapReader, IP, UDP, TCP
-from ids.detection import PortScanRule, HostSweepRule
+from scapy.all import PcapReader, IP, UDP, TCP, DNS
+from ids.detection import PortScanRule, HostSweepRule, DNSFailureRule, ConnectionSpikeRule
 import argparse
 
 # Extracts the fields from TCP/UDP packets used for flow analysis
@@ -8,9 +8,11 @@ def extract_packet_fields(packet):
     if TCP in packet:
         protocol = TCP
         tcp_flags = int(packet[TCP].flags)
+        tcp_seq = int(packet[TCP].seq)
     elif UDP in packet:
         protocol = UDP
         tcp_flags = None
+        tcp_seq = None
     else:
         return None
 
@@ -34,8 +36,19 @@ def extract_packet_fields(packet):
         "protocol" : protocol.__name__,
         "size_bytes" : size_bytes,
         "timestamp" : timestamp, 
-        "tcp_flags": tcp_flags
+        "tcp_flags": tcp_flags,
+        "tcp_seq" : tcp_seq 
     }
+
+    # If DNS packet check if packet is a reply and question (queried name) present
+    # If so add response code and formatted queried name to packet_dict
+    if DNS in packet:
+        dns = packet[DNS]
+        if dns.qr == 1 and dns.qd:
+            packet_dict["dns_rcode"] = int(dns.rcode)
+            packet_dict["dns_name"] = dns.qd[0].qname.decode(
+                "ascii", errors="backslashreplace"
+            ).lower()
 
     return packet_dict
 
@@ -53,8 +66,11 @@ def flow_key(fields):
 if __name__ == "__main__":
 
     flows = {}
+
     port_scan_rule = PortScanRule()
     host_sweep_rule = HostSweepRule()
+    dns_failure_rule = DNSFailureRule()
+    connection_spike_rule = ConnectionSpikeRule()
 
     parser = argparse.ArgumentParser()
     parser.add_argument("capture_path")
@@ -89,6 +105,30 @@ if __name__ == "__main__":
                         f"on {sweep_alert['distinct_host_count']} distinct hosts "
                         f"within {sweep_alert['window_seconds']} seconds. "
                         f"Hosts: {', '.join(sweep_alert['hosts'])}"
+                    )
+
+                # Checks the packet for suspicious DNS activity and prints the alert details if the rule triggers
+                dns_alert = dns_failure_rule.process_packet(fields)
+
+                if dns_alert is not None:
+                    print(
+                        f"[{dns_alert['timestamp']}] {dns_alert['rule']}: "
+                        f"{dns_alert['client']} received NXDOMAIN for "
+                        f"{dns_alert['distinct_name_count']} distinct names within "
+                        f"{dns_alert['window_seconds']} seconds. "
+                        f"Examples: {', '.join(dns_alert['example_names'])}"
+                    )
+
+                # Checks the packet for a high rate of TCP connection attempts and prints the alert details if the rule triggers
+                spike_alert = connection_spike_rule.process_packet(fields)
+
+                if spike_alert is not None:
+                    print(
+                        f"[{spike_alert['timestamp']}] {spike_alert['rule']}: "
+                        f"{spike_alert['dst_ip']}:{spike_alert['dst_port']} received "
+                        f"{spike_alert['attempt_count']} TCP connection attempts from "
+                        f"{spike_alert['source_count']} source IPs within "
+                        f"{spike_alert['window_seconds']} seconds."
                     )
 
                 # Initializing new flows from the packets captured and updating statistics
