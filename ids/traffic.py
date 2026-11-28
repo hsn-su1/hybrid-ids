@@ -1,4 +1,5 @@
 from scapy.all import PcapReader, IP, UDP, TCP
+from ids.detection import PortScanRule, HostSweepRule
 import argparse
 
 # Extracts the fields from TCP/UDP packets used for flow analysis
@@ -6,8 +7,10 @@ def extract_packet_fields(packet):
 
     if TCP in packet:
         protocol = TCP
+        tcp_flags = int(packet[TCP].flags)
     elif UDP in packet:
         protocol = UDP
+        tcp_flags = None
     else:
         return None
 
@@ -30,7 +33,8 @@ def extract_packet_fields(packet):
         "dst_port" : dst_port,
         "protocol" : protocol.__name__,
         "size_bytes" : size_bytes,
-        "timestamp" : timestamp 
+        "timestamp" : timestamp, 
+        "tcp_flags": tcp_flags
     }
 
     return packet_dict
@@ -49,6 +53,8 @@ def flow_key(fields):
 if __name__ == "__main__":
 
     flows = {}
+    port_scan_rule = PortScanRule()
+    host_sweep_rule = HostSweepRule()
 
     parser = argparse.ArgumentParser()
     parser.add_argument("capture_path")
@@ -60,8 +66,32 @@ if __name__ == "__main__":
 
             fields = extract_packet_fields(packet)
 
-            # Initializing new flows from the packets captured and updating statistics
             if fields is not None:
+
+                # Checks the packet for a possible port scan and prints the alert details if the rule triggers
+                port_alert = port_scan_rule.process_packet(fields)
+
+                if port_alert is not None:
+                    print(
+                        f"[{port_alert['timestamp']}] {port_alert['rule']}: "
+                        f"{port_alert['src_ip']} attempted {port_alert['distinct_port_count']} distinct TCP ports "
+                        f"on {port_alert['dst_ip']} within {port_alert['window_seconds']} seconds. "
+                        f"Ports: {port_alert['ports']}"
+                    )
+
+                # Checks the packet for a possible host sweep and prints the alert details if the rule triggers
+                sweep_alert = host_sweep_rule.process_packet(fields)
+
+                if sweep_alert is not None:
+                    print(
+                        f"[{sweep_alert['timestamp']}] {sweep_alert['rule']}: "
+                        f"{sweep_alert['src_ip']} attempted TCP port {sweep_alert['dst_port']} "
+                        f"on {sweep_alert['distinct_host_count']} distinct hosts "
+                        f"within {sweep_alert['window_seconds']} seconds. "
+                        f"Hosts: {', '.join(sweep_alert['hosts'])}"
+                    )
+
+                # Initializing new flows from the packets captured and updating statistics
                 key = flow_key(fields)
 
                 if key not in flows:
@@ -72,6 +102,7 @@ if __name__ == "__main__":
 
                 flows[key]["first_seen"] = min(flows[key]["first_seen"], fields["timestamp"])
                 flows[key]["last_seen"] = max(flows[key]["last_seen"], fields["timestamp"])
+
 
     # Once the capture is processed we calculate each flow's duration and average packet rate and output it
     for flow in flows.values():
